@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+build/
+dist/
+.idea/
+.vscode/
+exps/
+log/
+tmp/
+related_paper/
+*.pth
+*.pt
+*.ckpt
