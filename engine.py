@@ -154,7 +154,8 @@ def train_one_epoch_rmot(model: torch.nn.Module, criterion: torch.nn.Module,
         writer.add_scalar('Training/loss', loss_value, epoch * (data_loader.__len__()) + iter_id)
         loss_ce,loss_bbox,loss_giou,loss_refer=0,0,0,0
         temporal_loss_ce,temporal_loss_bbox,temporal_loss_giou,temporal_loss_refer=0,0,0,0
-        for i in range(4):
+        num_frames = len(data_dict['imgs'])
+        for i in range(num_frames):
             loss_ce += loss_dict_reduced_scaled_wo_aux['frame_{}_loss_ce'.format(i)]
             loss_bbox += loss_dict_reduced_scaled_wo_aux['frame_{}_loss_bbox'.format(i)]
             loss_giou += loss_dict_reduced_scaled_wo_aux['frame_{}_loss_giou'.format(i)]

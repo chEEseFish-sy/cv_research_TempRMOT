@@ -339,9 +339,9 @@ def main(args):
     print("Start training")
     start_time = time.time()
 
-    writer_name = args.output_dir.split('/')[1]
-    writer_name = os.path.join('./log', writer_name)
-    writer = SummaryWriter(writer_name)
+    run_path = Path(args.output_dir or args.save_dir)
+    writer_name = run_path.name or 'default'
+    writer = SummaryWriter(str(Path('./log') / writer_name))
 
     train_func = train_one_epoch
     if args.dataset_file in ['e2e_rmot','e2e_dance']:

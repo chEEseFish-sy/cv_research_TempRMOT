@@ -201,7 +201,9 @@ class DetMOTDetection:
 
         if 'KITTI' in img_path:
             video_id = img_path.split('/')[-2]
-            expression_list = os.listdir(osp.join(self.args.rmot_path, 'expression', video_id))
+            expression_list = sorted(
+                os.listdir(osp.join(self.args.rmot_path, 'expression', video_id))
+            )
             expression_random = random.choice(expression_list) # 某张照片随便获取一个语义表达式
             expression_path = osp.join(self.args.rmot_path, 'expression', video_id, expression_random)
             with open(expression_path, 'r') as f:
@@ -290,4 +292,3 @@ def build(image_set, args):
         data_txt_path = args.data_txt_path_train
         dataset = DetMOTDetection(args, data_txt_path=data_txt_path, seqs_folder=root, dataset2transform=dataset2transform)
     return dataset
-
