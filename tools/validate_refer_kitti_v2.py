@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 
@@ -24,13 +24,20 @@ EXPECTED_TEST_QUERIES = 862
 class Report:
     def __init__(self, detail_limit: int) -> None:
         self.counts: Counter[str] = Counter()
-        self.details: list[str] = []
+        self.details: dict[str, list[str]] = defaultdict(list)
+        self.warning_counts: Counter[str] = Counter()
+        self.warning_details: dict[str, list[str]] = defaultdict(list)
         self.detail_limit = detail_limit
 
     def error(self, category: str, message: str) -> None:
         self.counts[category] += 1
-        if len(self.details) < self.detail_limit:
-            self.details.append(f"[{category}] {message}")
+        if len(self.details[category]) < self.detail_limit:
+            self.details[category].append(message)
+
+    def warning(self, category: str, message: str) -> None:
+        self.warning_counts[category] += 1
+        if len(self.warning_details[category]) < self.detail_limit:
+            self.warning_details[category].append(message)
 
     @property
     def total_errors(self) -> int:
@@ -167,6 +174,9 @@ def check_expressions(
 ) -> tuple[int, set[str]]:
     expression_root = root / "expression"
     paths = sorted(expression_root.glob("*/*.json")) if expression_root.is_dir() else []
+    video_label_ids: dict[str, set[int]] = defaultdict(set)
+    for label_path, object_ids in label_cache.items():
+        video_label_ids[label_path.parent.name].update(object_ids)
     videos: set[str] = set()
     for path in paths:
         videos.add(path.parent.name)
@@ -183,7 +193,13 @@ def check_expressions(
         if not isinstance(payload["label"], dict):
             report.error("bad_json_label", str(path))
             continue
-        video_name = str(payload["video_name"]).zfill(4)
+        raw_video_name = str(payload["video_name"])
+        if raw_video_name.upper().startswith("KITTI_"):
+            raw_video_name = raw_video_name.split("_", 1)[1]
+        try:
+            video_name = f"{int(raw_video_name):04d}"
+        except ValueError:
+            video_name = raw_video_name
         if video_name != path.parent.name:
             report.error("json_video_mismatch", f"{path}: video_name={payload['video_name']!r}")
 
@@ -211,10 +227,11 @@ def check_expressions(
                     report.error("bad_json_object_id", f"{path}: {object_id!r}")
                     continue
                 if normalized_id not in label_ids:
-                    report.error(
-                        "orphan_object_id",
-                        f"{path}: frame {frame}, object {normalized_id}",
-                    )
+                    message = f"{path}: frame {frame}, object {normalized_id}"
+                    if normalized_id not in video_label_ids[path.parent.name]:
+                        report.error("unknown_object_id", message)
+                    else:
+                        report.warning("reference_without_box", message)
     return len(paths), videos
 
 
@@ -271,8 +288,17 @@ def main() -> int:
         print(f"  {category}: {count}")
     if report.details:
         print("error_details:")
-        for detail in report.details:
-            print(f"  {detail}")
+        for category in sorted(report.details):
+            for detail in report.details[category]:
+                print(f"  [{category}] {detail}")
+    print(f"warnings: {sum(report.warning_counts.values())}")
+    for category, count in sorted(report.warning_counts.items()):
+        print(f"  {category}: {count}")
+    if report.warning_details:
+        print("warning_details:")
+        for category in sorted(report.warning_details):
+            for detail in report.warning_details[category]:
+                print(f"  [{category}] {detail}")
 
     if report.total_errors:
         print("G validation: FAILED")
