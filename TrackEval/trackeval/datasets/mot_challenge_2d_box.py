@@ -18,6 +18,7 @@ class MotChallenge2DBox(_BaseDataset):
         code_path = utils.get_code_path()
         default_config = {
             'GT_FOLDER': os.path.join(code_path, 'data/gt/mot_challenge/'),  # Location of GT data
+            'IMAGES_FOLDER': None,  # Image root used to determine Refer-KITTI sequence lengths
             'TRACKERS_FOLDER': os.path.join(code_path, 'data/trackers/mot_challenge/'),  # Trackers location
             'OUTPUT_FOLDER': None,  # Where to save eval results (if None, same as TRACKERS_FOLDER)
             'TRACKERS_TO_EVAL': [],  # Filenames of trackers to eval (if None, all in folder)
@@ -183,7 +184,15 @@ class MotChallenge2DBox(_BaseDataset):
                         ini_data.read(ini_file)
                         seq_lengths[row[0]] = int(ini_data['Sequence']['seqLength'])
                     else:
-                        img_path = os.path.join('/data_2/zyn/refer-kitti-v2/KITTI/training/image_02', seq)
+                        if not self.config['IMAGES_FOLDER']:
+                            raise TrackEvalException(
+                                'IMAGES_FOLDER must be set for Refer-KITTI evaluation.'
+                            )
+                        img_path = os.path.join(self.config['IMAGES_FOLDER'], seq)
+                        if not os.path.isdir(img_path):
+                            raise TrackEvalException(
+                                'Image sequence folder not found: ' + img_path
+                            )
                         img_list = os.listdir(img_path)
                         seq_lengths[row[0]] = int(len(img_list))
         return seq_list, seq_lengths
@@ -245,7 +254,7 @@ class MotChallenge2DBox(_BaseDataset):
             time_key = str(t+1)
             if time_key in read_data.keys():
                 try:
-                    time_data = np.asarray(read_data[time_key], dtype=np.float)
+                    time_data = np.asarray(read_data[time_key], dtype=np.float64)
                 except ValueError:
                     if is_gt:
                         raise TrackEvalException(
@@ -376,7 +385,7 @@ class MotChallenge2DBox(_BaseDataset):
 
             # Match tracker and gt dets (with hungarian algorithm) and remove tracker dets which match with gt dets
             # which are labeled as belonging to a distractor class.
-            to_remove_tracker = np.array([], np.int)
+            to_remove_tracker = np.array([], dtype=np.int64)
             if self.do_preproc and self.benchmark != 'MOT15' and gt_ids.shape[0] > 0 and tracker_ids.shape[0] > 0:
 
                 # Check all classes are valid:
@@ -430,14 +439,14 @@ class MotChallenge2DBox(_BaseDataset):
             gt_id_map[unique_gt_ids] = np.arange(len(unique_gt_ids))
             for t in range(raw_data['num_timesteps']):
                 if len(data['gt_ids'][t]) > 0:
-                    data['gt_ids'][t] = gt_id_map[data['gt_ids'][t]].astype(np.int)
+                    data['gt_ids'][t] = gt_id_map[data['gt_ids'][t]].astype(np.int64)
         if len(unique_tracker_ids) > 0:
             unique_tracker_ids = np.unique(unique_tracker_ids)
             tracker_id_map = np.nan * np.ones((np.max(unique_tracker_ids) + 1))
             tracker_id_map[unique_tracker_ids] = np.arange(len(unique_tracker_ids))
             for t in range(raw_data['num_timesteps']):
                 if len(data['tracker_ids'][t]) > 0:
-                    data['tracker_ids'][t] = tracker_id_map[data['tracker_ids'][t]].astype(np.int)
+                    data['tracker_ids'][t] = tracker_id_map[data['tracker_ids'][t]].astype(np.int64)
 
         # Record overview statistics.
         data['num_tracker_dets'] = num_tracker_dets
