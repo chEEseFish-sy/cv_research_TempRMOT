@@ -320,11 +320,11 @@ class ListImgDataset(Dataset):
 
 
 class Detector(object):
-    def __init__(self, args, checkpoint_id=None, model=None, seq_num=2):
+    def __init__(self, args, checkpoint_tag=None, model=None, seq_num=2):
 
         self.args = args
         self.detr = model
-        self.checkpoint_id = checkpoint_id
+        self.checkpoint_tag = checkpoint_tag
 
         self.seq_num = seq_num
         img_list = os.listdir(os.path.join(self.args.rmot_path, 'KITTI/training/image_02', self.seq_num[0]))
@@ -332,6 +332,8 @@ class Detector(object):
                     for _ in img_list if ('jpg' in _) or ('png' in _)]
 
         self.img_list = sorted(img_list)
+        if self.args.max_frames is not None:
+            self.img_list = self.img_list[:self.args.max_frames]
         self.img_len = len(self.img_list)
 
         self.json_path = os.path.join(self.args.rmot_path, 'expression', seq_num[0], seq_num[1])
@@ -343,7 +345,11 @@ class Detector(object):
         self.tr_tracker = TransRMOT()
         # self.tr_tracker_withouRef = TransRMOT()
         self.save_path = os.path.join(self.args.output_dir,
-                                      'results_epoch{}/{}/{}'.format(checkpoint_id, seq_num[0], seq_num[1].split('.')[0]))
+                                      'results_{}/{}/{}'.format(
+                                          checkpoint_tag,
+                                          seq_num[0],
+                                          Path(seq_num[1]).stem,
+                                      ))
         os.makedirs(self.save_path, exist_ok=True)
 
         self.predict_path = os.path.join(self.args.output_dir, self.args.exp_name)
@@ -422,7 +428,7 @@ class Detector(object):
         #     img_show = draw_bboxes(img_show, gt_boxes, identities=np.ones((len(gt_boxes),)) * -1)
         cv2.imwrite(img_path, cv2.cvtColor(img_show.numpy(), cv2.COLOR_RGB2BGR))
 
-    def detect(self, prob_threshold=0.6, area_threshold=100):
+    def detect(self):
         last_dt_embedding = None
         total_dts = 0
         total_occlusion_dts = 0
@@ -447,11 +453,17 @@ class Detector(object):
             dt_instances = track_instances.to(torch.device('cpu'))
 
             # filter det instances by score.
-            dt_instances = self.filter_dt_by_score(dt_instances, prob_threshold)
-            dt_instances = self.filter_dt_by_area(dt_instances, area_threshold)
+            dt_instances = self.filter_dt_by_score(
+                dt_instances, self.args.object_threshold
+            )
+            dt_instances = self.filter_dt_by_area(
+                dt_instances, self.args.area_threshold
+            )
 
             # filter det instances by refer scores
-            dt_instances = self.filter_dt_by_ref_scores(dt_instances, 0.4)
+            dt_instances = self.filter_dt_by_ref_scores(
+                dt_instances, self.args.referring_threshold
+            )
 
             num_occlusion = (dt_instances.labels == 1).sum()
             dt_instances.scores[dt_instances.labels == 1] *= -1
@@ -475,12 +487,10 @@ class Detector(object):
                       os.path.join(self.args.rmot_path, 'KITTI/labels_with_ids/image_02', self.seq_num[0]), seq_h, seq_w)
         print("totally {} dts {} occlusion dts".format(total_dts, total_occlusion_dts))
 
-def sub_processor(pid,seq_nums,args):
+def sub_processor(gpu_id, seq_nums, args, checkpoint_tag):
     # load model and weights
-    torch.cuda.set_device(pid)
+    torch.cuda.set_device(gpu_id)
     detr, _, _ = build_model(args)
-    checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
-    checkpoint_id = int(args.resume.split('/')[-1].split('.')[0].split('t')[-1])
     detr = load_model(detr, args.resume)
     detr.eval()
     detr = detr.cuda()
@@ -489,18 +499,36 @@ def sub_processor(pid,seq_nums,args):
     # detr.to(device)
     for seq_num in seq_nums:
         print('Evaluating seq {}'.format(seq_num))
-        det = Detector(args, checkpoint_id, model=detr, seq_num=seq_num)
+        det = Detector(args, checkpoint_tag, model=detr, seq_num=seq_num)
         det.detect()
 
 if __name__ == '__main__':
-    torch.multiprocessing.set_start_method('spawn')
+    torch.multiprocessing.set_start_method('spawn', force=True)
     parser = argparse.ArgumentParser('DETR training and evaluation script', parents=[get_args_parser()])
     args0 = parser.parse_args()
     if args0.output_dir:
         Path(args0.output_dir).mkdir(parents=True, exist_ok=True)
+    if not args0.resume:
+        parser.error('--resume is required for inference')
+    if args0.num_inference_workers < 1:
+        parser.error('--num_inference_workers must be at least 1')
+    if args0.gpu_id < 0:
+        parser.error('--gpu_id must be non-negative')
+    if args0.max_expressions is not None and args0.max_expressions < 1:
+        parser.error('--max_expressions must be at least 1')
+    if args0.max_frames is not None and args0.max_frames < 1:
+        parser.error('--max_frames must be at least 1')
+    available_gpus = torch.cuda.device_count()
+    if args0.gpu_id + args0.num_inference_workers > available_gpus:
+        parser.error(
+            'requested inference workers exceed available CUDA devices: '
+            f'{available_gpus}'
+        )
 
     expressions_root = os.path.join(args0.rmot_path, 'expression')
-    if "refer-kitti-v2" in args0.rmot_path:
+    if args0.video_ids:
+        video_ids = args0.video_ids
+    elif "refer-kitti-v2" in args0.rmot_path:
         video_ids = ['0005', '0011', '0013','0019']
     else:
         video_ids = ['0005', '0011', '0013']
@@ -510,24 +538,37 @@ if __name__ == '__main__':
         expression_jsons = sorted(os.listdir(os.path.join(expressions_root, video_id)))
         for expression_json in expression_jsons:
             seq_nums.append([video_id, expression_json])
+    if args0.max_expressions is not None:
+        seq_nums = seq_nums[:args0.max_expressions]
 
-    thread_num = 8
+    worker_count = min(args0.num_inference_workers, len(seq_nums))
     processes = []
 
     expression_num = len(seq_nums)
-    per_thread_seq_num = expression_num // thread_num
+    if expression_num == 0:
+        parser.error('no expressions matched the requested filters')
+    checkpoint_tag = Path(args0.resume).stem
+    per_worker_seq_num = expression_num // worker_count
 
     print("Start inference")
-    for i in range(thread_num):
-        if i == thread_num -1:
-            sub_seq_list = seq_nums[i*per_thread_seq_num:]
-        else:
-            sub_seq_list = seq_nums[i*per_thread_seq_num:(i+1)*per_thread_seq_num]
-        p = mp.Process(target=sub_processor,args=(i,sub_seq_list,args0))
-        p.start()
-        processes.append(p)
-    
+    if worker_count == 1:
+        sub_processor(args0.gpu_id, seq_nums, args0, checkpoint_tag)
+    else:
+        for i in range(worker_count):
+            if i == worker_count - 1:
+                sub_seq_list = seq_nums[i*per_worker_seq_num:]
+            else:
+                sub_seq_list = seq_nums[i*per_worker_seq_num:(i+1)*per_worker_seq_num]
+            p = mp.Process(
+                target=sub_processor,
+                args=(args0.gpu_id + i, sub_seq_list, args0, checkpoint_tag),
+            )
+            p.start()
+            processes.append(p)
+
     for p in processes:
         p.join()
+        if p.exitcode != 0:
+            raise RuntimeError(f'inference worker {p.pid} exited with {p.exitcode}')
 
     print("Over")

@@ -164,6 +164,19 @@ def get_args_parser():
                         default='/home/curtis/checkpoints/roberta-base', type=str,
                         help='local path to the frozen RoBERTa text encoder')
     parser.add_argument('--input_video', default='figs/demo.mp4', type=str)
+    parser.add_argument('--num_inference_workers', default=1, type=int,
+                        help='number of inference processes; use one per GPU')
+    parser.add_argument('--gpu_id', default=0, type=int,
+                        help='first CUDA device used for inference')
+    parser.add_argument('--video_ids', nargs='*', default=None,
+                        help='optional Refer-KITTI video IDs to process')
+    parser.add_argument('--max_expressions', default=None, type=int,
+                        help='optional cap on the number of expressions')
+    parser.add_argument('--max_frames', default=None, type=int,
+                        help='optional cap on frames per expression')
+    parser.add_argument('--object_threshold', default=0.6, type=float)
+    parser.add_argument('--referring_threshold', default=0.4, type=float)
+    parser.add_argument('--area_threshold', default=100.0, type=float)
     parser.add_argument('--data_txt_path_train',
                         default='./datasets/data_path/refer-kitti.train', type=str,
                         help="path to dataset txt split")
