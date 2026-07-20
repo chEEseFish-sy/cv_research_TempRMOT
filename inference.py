@@ -479,7 +479,7 @@ def sub_processor(pid,seq_nums,args):
     # load model and weights
     torch.cuda.set_device(pid)
     detr, _, _ = build_model(args)
-    checkpoint = torch.load(args.resume, map_location='cpu')
+    checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
     checkpoint_id = int(args.resume.split('/')[-1].split('.')[0].split('t')[-1])
     detr = load_model(detr, args.resume)
     detr.eval()

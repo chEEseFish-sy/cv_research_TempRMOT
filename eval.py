@@ -405,7 +405,7 @@ if __name__ == '__main__':
 
     # load model and weights
     detr, _, _ = build_model(args)
-    checkpoint = torch.load(args.resume, map_location='cpu')
+    checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
     detr = load_model(detr, args.resume)
     detr = detr.cuda()
     detr.eval()

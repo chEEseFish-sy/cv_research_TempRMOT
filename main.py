@@ -282,7 +282,9 @@ def main(args):
         model_without_ddp = model.module
 
     if args.frozen_weights is not None:
-        checkpoint = torch.load(args.frozen_weights, map_location='cpu')
+        checkpoint = torch.load(
+            args.frozen_weights, map_location='cpu', weights_only=False
+        )
         model_without_ddp.detr.load_state_dict(checkpoint['model'])
 
     if args.pretrained is not None:
@@ -294,7 +296,9 @@ def main(args):
             checkpoint = torch.hub.load_state_dict_from_url(
                 args.resume, map_location='cpu', check_hash=True)
         else:
-            checkpoint = torch.load(args.resume, map_location='cpu')
+            checkpoint = torch.load(
+                args.resume, map_location='cpu', weights_only=False
+            )
         missing_keys, unexpected_keys = model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
         unexpected_keys = [k for k in unexpected_keys if not (k.endswith('total_params') or k.endswith('total_ops'))]
         if len(missing_keys) > 0:
