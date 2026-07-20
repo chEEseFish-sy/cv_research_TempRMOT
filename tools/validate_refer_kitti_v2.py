@@ -19,6 +19,8 @@ TRAIN_SEQUENCES = {
 TEST_SEQUENCES = {"0005", "0011", "0013", "0019"}
 EXPECTED_TRAIN_IMAGES = 5172
 EXPECTED_TEST_QUERIES = 862
+EXPECTED_LABEL_FILES = 7162
+EXPECTED_EXPRESSION_FILES = 9758
 
 
 class Report:
@@ -165,6 +167,8 @@ def check_train_list(root: Path, train_list: Path, report: Report) -> tuple[int,
 def check_labels(root: Path, report: Report) -> tuple[int, dict[Path, set[int]]]:
     label_root = root / "KITTI/labels_with_ids/image_02"
     paths = sorted(label_root.glob("*/*.txt")) if label_root.is_dir() else []
+    if len(paths) != EXPECTED_LABEL_FILES:
+        report.error("label_file_count", f"expected {EXPECTED_LABEL_FILES}, found {len(paths)}")
     cache = {path: parse_label_ids(path, report) for path in paths}
     return len(paths), cache
 
@@ -174,6 +178,11 @@ def check_expressions(
 ) -> tuple[int, set[str]]:
     expression_root = root / "expression"
     paths = sorted(expression_root.glob("*/*.json")) if expression_root.is_dir() else []
+    if len(paths) != EXPECTED_EXPRESSION_FILES:
+        report.error(
+            "expression_file_count",
+            f"expected {EXPECTED_EXPRESSION_FILES}, found {len(paths)}",
+        )
     video_label_ids: dict[str, set[int]] = defaultdict(set)
     for label_path, object_ids in label_cache.items():
         video_label_ids[label_path.parent.name].update(object_ids)
@@ -232,6 +241,11 @@ def check_expressions(
                         report.error("unknown_object_id", message)
                     else:
                         report.warning("reference_without_box", message)
+    if videos != EXPECTED_SEQUENCES:
+        report.error(
+            "expression_video_set",
+            f"expected {sorted(EXPECTED_SEQUENCES)}, found {sorted(videos)}",
+        )
     return len(paths), videos
 
 
