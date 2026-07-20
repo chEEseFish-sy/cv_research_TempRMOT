@@ -21,7 +21,7 @@ from torch import nn
 from torchvision.models._utils import IntermediateLayerGetter
 from typing import Dict, List
 
-from util.misc import NestedTensor, is_main_process
+from util.misc import NestedTensor
 from .position_encoding import build_position_encoding
 from torch.cuda.amp import autocast as autocast
 class FrozenBatchNorm2d(torch.nn.Module):
@@ -99,11 +99,13 @@ class Backbone(BackboneBase):
     def __init__(self, name: str,
                  train_backbone: bool,
                  return_interm_layers: bool,
-                 dilation: bool,):
+                 dilation: bool,
+                 pretrained: bool = False):
         norm_layer = FrozenBatchNorm2d
+        weights = torchvision.models.get_model_weights(name).DEFAULT if pretrained else None
         backbone = getattr(torchvision.models, name)(
             replace_stride_with_dilation=[False, False, dilation],
-            pretrained=is_main_process(), norm_layer=norm_layer)
+            weights=weights, norm_layer=norm_layer)
         assert name not in ('resnet18', 'resnet34'), "number of channels are hard coded"
         super().__init__(backbone, train_backbone, return_interm_layers)
         if dilation:
@@ -134,6 +136,12 @@ def build_backbone(args):
     position_embedding = build_position_encoding(args)
     train_backbone = args.lr_backbone > 0  # True
     return_interm_layers = args.masks or (args.num_feature_levels > 1) # False or True
-    backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation)
+    backbone = Backbone(
+        args.backbone,
+        train_backbone,
+        return_interm_layers,
+        args.dilation,
+        pretrained=args.backbone_pretrained,
+    )
     model = Joiner(backbone, position_embedding)
     return model

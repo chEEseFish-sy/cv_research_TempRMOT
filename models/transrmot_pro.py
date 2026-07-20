@@ -462,7 +462,8 @@ def _get_clones(module, N):
 
 class TransRMOT(nn.Module):
     def __init__(self, backbone, transformer, num_classes, num_queries, num_feature_levels, criterion, track_embed,
-                 aux_loss=True, with_box_refine=False, two_stage=False, memory_bank=None, use_checkpoint=False,tracking=False,hist_len=4):
+                 aux_loss=True, with_box_refine=False, two_stage=False, memory_bank=None, use_checkpoint=False,
+                 tracking=False, hist_len=4, text_encoder_path='roberta-base'):
         """ Initializes the model.
         Parameters:
             backbone: torch module of the backbone to be used. See backbone.py
@@ -527,9 +528,9 @@ class TransRMOT(nn.Module):
         # self.text_encoder = RobertaModel.from_pretrained(text_encoder_type)
         # self.text_encoder.pooler = None  # this pooler is never used, this is a hack to avoid DDP problems...
 
-        self.tokenizer = RobertaTokenizerFast.from_pretrained('/data_2/zyn/Data4RMOT/FairMOT/src/roberta_base/',
+        self.tokenizer = RobertaTokenizerFast.from_pretrained(text_encoder_path,
                                                               local_files_only=True)
-        self.text_encoder = RobertaModel.from_pretrained('/data_2/zyn/Data4RMOT/FairMOT/src/roberta_base/',
+        self.text_encoder = RobertaModel.from_pretrained(text_encoder_path,
                                                          local_files_only=True)
 
         freeze_text_encoder = True
@@ -1010,6 +1011,7 @@ def build(args):
         memory_bank=memory_bank,
         use_checkpoint=args.use_checkpoint,
         tracking = args.tracking,
-        hist_len = args.hist_len
+        hist_len = args.hist_len,
+        text_encoder_path=args.text_encoder_path,
     )
     return model, criterion, postprocessors

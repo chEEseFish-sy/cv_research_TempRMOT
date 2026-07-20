@@ -69,6 +69,8 @@ def get_args_parser():
     # * Backbone
     parser.add_argument('--backbone', default='resnet50', type=str,
                         help="Name of the convolutional backbone to use")
+    parser.add_argument('--backbone_pretrained', action='store_true',
+                        help='initialize the backbone with torchvision default weights')
     parser.add_argument('--enable_fpn', action='store_true')
     parser.add_argument('--dilation', action='store_true',
                         help="If true, we replace stride with dilation in the last convolutional block (DC5)")
@@ -158,6 +160,9 @@ def get_args_parser():
 
     # end-to-end rmot settings.
     parser.add_argument('--rmot_path', default='/data_2/zyn/refer-kitti-v2', type=str)
+    parser.add_argument('--text_encoder_path',
+                        default='/home/curtis/checkpoints/roberta-base', type=str,
+                        help='local path to the frozen RoBERTa text encoder')
     parser.add_argument('--input_video', default='figs/demo.mp4', type=str)
     parser.add_argument('--data_txt_path_train',
                         default='./datasets/data_path/refer-kitti.train', type=str,
