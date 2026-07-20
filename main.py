@@ -159,7 +159,8 @@ def get_args_parser():
     parser.add_argument('--cache_mode', default=False, action='store_true', help='whether to cache images on memory')
 
     # end-to-end rmot settings.
-    parser.add_argument('--rmot_path', default='/data_2/zyn/refer-kitti-v2', type=str)
+    parser.add_argument('--rmot_path',
+                        default='/home/curtis/datasets/refer-kitti-v2', type=str)
     parser.add_argument('--text_encoder_path',
                         default='/home/curtis/checkpoints/roberta-base', type=str,
                         help='local path to the frozen RoBERTa text encoder')
