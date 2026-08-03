@@ -1,0 +1,4 @@
+interface:
+  display_name: "RMOT Research Director"
+  short_description: "Create gated persistent plans for TempRMOT research work"
+  default_prompt: "Use $plan-rmot-research to create a gated research plan for this TempRMOT objective."

@@ -178,6 +178,10 @@ def get_args_parser():
     parser.add_argument('--object_threshold', default=0.6, type=float)
     parser.add_argument('--referring_threshold', default=0.4, type=float)
     parser.add_argument('--area_threshold', default=100.0, type=float)
+    parser.add_argument('--audit_candidates', action='store_true',
+                        help='write pre-filter inference candidates for auditing')
+    parser.add_argument('--audit_dir', default=None, type=str,
+                        help='output directory for pre-filter candidate audit CSV files')
     parser.add_argument('--data_txt_path_train',
                         default='./datasets/data_path/refer-kitti.train', type=str,
                         help="path to dataset txt split")

@@ -1,0 +1,4 @@
+interface:
+  display_name: "RMOT Feasibility Reviewer"
+  short_description: "Judge novelty evidence cost and publication risk independently"
+  default_prompt: "Use $assess-rmot-feasibility to independently review the active RMOT research plan."

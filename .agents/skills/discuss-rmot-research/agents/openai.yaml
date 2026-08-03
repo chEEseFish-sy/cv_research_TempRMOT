@@ -1,0 +1,4 @@
+interface:
+  display_name: "RMOT Research Dialogue"
+  short_description: "Answer RMOT questions from paper evidence without making edits"
+  default_prompt: "Use $discuss-rmot-research to answer this RMOT question from my notes and Zotero evidence."

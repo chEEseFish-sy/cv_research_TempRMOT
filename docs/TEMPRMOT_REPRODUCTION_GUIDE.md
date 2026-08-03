@@ -651,6 +651,7 @@ KITTI 官方 tracking 数据包含 21 个训练序列；V2 以其中 17 个序�
 --dataset_file e2e_rmot
 --with_box_refine
 --batch_size 1
+--sampler_steps 60 80 90
 --sampler_lengths 5 5 5 5
 --update_query_pos
 --merger_dropout 0
@@ -658,12 +659,14 @@ KITTI 官方 tracking 数据包含 21 个训练序列；V2 以其中 17 个序�
 --random_drop 0.1
 --fp_ratio 0.3
 --query_interaction_layer QIM
---extra_track_attn
---hist_len 8
+--hist_len 4
 --text_encoder_path /home/curtis/checkpoints/roberta-base
 ```
 
 即使推理不使用训练 dataset，`build_model()` 仍会执行 `max(args.sampler_lengths)`，所以 `--sampler_lengths` 不能省略。
+
+以上结构参数以 `checkpoint_rk2.pth` 内保存的 `args` 为准。不要为该 checkpoint 启用
+`--extra_track_attn`；否则会新增 checkpoint 中不存在的 36 个 `update_attn/norm4` 状态项。
 
 通过标准：模型构建成功；RoBERTa 保持 frozen；没有联网下载；GPU 显存没有持续增长。
 
@@ -738,16 +741,15 @@ python inference.py \
   --batch_size 1 \
   --sample_mode random_interval \
   --sample_interval 1 \
-  --sampler_steps 50 90 150 \
-  --sampler_lengths 2 3 4 5 \
+  --sampler_steps 60 80 90 \
+  --sampler_lengths 5 5 5 5 \
   --update_query_pos \
   --merger_dropout 0 \
   --dropout 0 \
   --random_drop 0.1 \
   --fp_ratio 0.3 \
   --query_interaction_layer QIM \
-  --extra_track_attn \
-  --hist_len 8 \
+  --hist_len 4 \
   --rmot_path /home/curtis/datasets/refer-kitti-v2 \
   --text_encoder_path /home/curtis/checkpoints/roberta-base \
   --resume /home/curtis/checkpoints/TempRMOT/checkpoint_rk2.pth \
@@ -765,7 +767,7 @@ python inference.py \
 
 - 每条 seqmap 都有唯一结果目录。
 - 每个目录都有 `predict.txt` 和 `gt.txt`。
-- 不存在空文件，除非该表达式在全视频确实无 GT；此情况必须单独审计。
+- 空 `predict.txt` 允许表示阈值过滤后没有预测目标，但必须保留文件并单独计数；`gt.txt` 不得缺失或为空。
 - 没有重复帧-ID-轨迹 ID 行。
 - 所有框宽高非负，坐标没有 NaN/Inf。
 - 推理进程退出码为 0。
@@ -790,15 +792,15 @@ python run_mot_challenge.py \
   --METRICS HOTA \
   --SEQMAP_FILE /home/curtis/projects/TempRMOT/datasets/data_path/seqmap.txt \
   --SKIP_SPLIT_FOL True \
-  --GT_FOLDER /home/curtis/datasets/refer-kitti-v2/KITTI/training/image_02 \
+  --GT_FOLDER /home/curtis/experiments/TempRMOT/rk2_official/results_checkpoint_rk2 \
   --IMAGES_FOLDER /home/curtis/datasets/refer-kitti-v2/KITTI/training/image_02 \
   --TRACKERS_FOLDER /home/curtis/experiments/TempRMOT/rk2_official/results_checkpoint_rk2 \
-  --GT_LOC_FORMAT '{gt_folder}{video_id}/{expression_id}/gt.txt' \
+  --GT_LOC_FORMAT '{gt_folder}/{video_id}/{expression_id}/gt.txt' \
   --TRACKERS_TO_EVAL /home/curtis/experiments/TempRMOT/rk2_official/results_checkpoint_rk2 \
   --USE_PARALLEL True \
   --NUM_PARALLEL_CORES 2 \
   --PLOT_CURVES False \
-  2>&1 | tee /home/curtis/experiments/TempRMOT/rk2_official/trackeval.log
+  2>&1 | tee /home/curtis/experiments/TempRMOT/rk2_official/trackeval-full.log
 ```
 
 实际 `results_...` 目录名以 E4 补丁后的稳定规则为准，执行前必须先 `find` 核对。`GT_FOLDER` 在这份定制 TrackEval 中部分语义已被改写；不可直接换成上游最新版 TrackEval 后仍期待相同目录解析。
@@ -815,7 +817,7 @@ python run_mot_challenge.py \
 2. 是否完整加载 STReasoner、refinement 和 RoBERTa 相关权重。
 3. 数据是否是 V2 修正版 `labels_with_ids`。
 4. 测试集合是否为 4 个视频、862 条 seqmap。
-5. `hist_len=8`。
+5. 对 `checkpoint_rk2.pth` 使用其保存参数 `hist_len=4`，且不要启用 checkpoint 中不存在的 `extra_track_attn`。
 6. object threshold 0.6、referring threshold 0.4、area threshold 100。
 7. 图像缩放是否保持短边 800、长边不超过 1536（`inference.py` 当前行为）。
 8. frame ID 是否统一为 1-based，GT 是否额外加 1 且仅加一次。
@@ -935,16 +937,16 @@ HOTA / DetA / AssA / 其他指标：
 
 只有上一门禁通过才进入下一阶段：
 
-- [ ] A：源码已清理、Git baseline 已建立。
-- [ ] B：现有 PyTorch/CUDA/GPU 验证通过。
-- [ ] C：CUDA 扩展 forward/backward 全通过。
-- [ ] D：依赖可导入、`pip check` 通过、环境已锁定。
-- [ ] E：最小兼容补丁逐项提交并回归检查。
-- [ ] F：RoBERTa 与官方 checkpoint 离线可读，SHA256 已保存。
-- [ ] G：数据 17/4 划分、训练列表与 862 条 seqmap 完整。
-- [ ] H：单 query 全视频推理与单 query HOTA 闭环成功。
-- [ ] I：全量推理 862/862，无缺失或覆盖。
-- [ ] J：HOTA/DetA/AssA 与论文差值在容差内。
+- [x] A：源码已清理、Git baseline 已建立。
+- [x] B：现有 PyTorch/CUDA/GPU 验证通过。
+- [x] C：CUDA 扩展 forward/backward 全通过。
+- [x] D：依赖可导入、`pip check` 通过、环境已锁定。
+- [x] E：最小兼容补丁逐项提交并回归检查。
+- [x] F：RoBERTa 与官方 checkpoint 离线可读，SHA256 已保存。
+- [x] G：数据 17/4 划分、训练列表与 862 条 seqmap 完整。
+- [x] H：单 query 全视频推理与单 query HOTA 闭环成功。
+- [x] I：全量推理 862/862，无缺失或覆盖。
+- [x] J：862 条 TrackEval 完成；HOTA 35.249，与官方值差 +0.209，轻微超出预设容差并已归档。
 - [ ] K：本机 smoke training 能更新并恢复 checkpoint。
 - [ ] L：如有多卡资源，再做严格训练与消融。
 

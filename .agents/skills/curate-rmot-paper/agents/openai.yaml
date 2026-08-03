@@ -1,0 +1,4 @@
+interface:
+  display_name: "RMOT Paper Curator"
+  short_description: "Deep-read Zotero papers into evidence-grounded Obsidian notes"
+  default_prompt: "Use $curate-rmot-paper to deep-read this Zotero paper and update its RMOT Obsidian note."

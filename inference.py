@@ -43,6 +43,7 @@ from util.evaluation import Evaluator
 import motmetrics as mm
 import shutil
 import json
+import csv
 import matplotlib.pyplot as plt
 import copy
 
@@ -320,6 +321,28 @@ class ListImgDataset(Dataset):
 
 
 class Detector(object):
+    AUDIT_FIELDNAMES = [
+        'run_id',
+        'sample_id',
+        'variant',
+        'video_id',
+        'expression_id',
+        'frame_id',
+        'query_id',
+        'x1',
+        'y1',
+        'x2',
+        'y2',
+        'object_score',
+        'refer_score',
+        'predicted_state',
+        'area',
+        'pass_object',
+        'pass_area',
+        'pass_refer',
+        'pass_all',
+    ]
+
     def __init__(self, args, checkpoint_tag=None, model=None, seq_num=2):
 
         self.args = args
@@ -341,6 +364,11 @@ class Detector(object):
             json_info = json.load(f)
         self.json_info = json_info
         self.sentence = [json_info['sentence']]
+        self.expression_id = Path(seq_num[1]).stem
+        self.sample_id = self.expression_id
+        self.variant = 'official'
+        if '__' in self.expression_id:
+            self.sample_id, self.variant = self.expression_id.rsplit('__', 1)
 
         self.tr_tracker = TransRMOT()
         # self.tr_tracker_withouRef = TransRMOT()
@@ -356,6 +384,18 @@ class Detector(object):
         os.makedirs(self.predict_path, exist_ok=True)
         if os.path.exists(os.path.join(self.predict_path, f'{self.seq_num}.txt')):
             os.remove(os.path.join(self.predict_path, f'{self.seq_num}.txt'))
+
+        self.audit_path = None
+        if self.args.audit_candidates:
+            audit_video_dir = os.path.join(self.args.audit_dir, self.seq_num[0])
+            os.makedirs(audit_video_dir, exist_ok=True)
+            self.audit_path = os.path.join(
+                audit_video_dir,
+                '{}.csv'.format(self.expression_id),
+            )
+            with open(self.audit_path, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=self.AUDIT_FIELDNAMES)
+                writer.writeheader()
 
     @staticmethod
     def filter_dt_by_score(dt_instances: Instances, prob_threshold: float) -> Instances:
@@ -374,6 +414,53 @@ class Detector(object):
     def filter_dt_by_ref_scores(dt_instances: Instances, ref_threshold: float) -> Instances:
         keep = dt_instances.refers > ref_threshold
         return dt_instances[keep]
+
+    def write_candidate_audit(self, frame_id: int, dt_instances: Instances) -> None:
+        if self.audit_path is None:
+            return
+
+        boxes = dt_instances.boxes.detach().cpu().tolist()
+        object_scores = dt_instances.scores.detach().cpu().tolist()
+        refer_scores = dt_instances.refers.detach().cpu().tolist()
+        query_ids = dt_instances.obj_idxes.detach().cpu().tolist()
+        predicted_states = dt_instances.labels.detach().cpu().tolist()
+        run_id = Path(self.args.output_dir).name or self.checkpoint_tag
+
+        rows = []
+        for box, object_score, refer_score, query_id, predicted_state in zip(
+                boxes, object_scores, refer_scores, query_ids, predicted_states):
+            x1, y1, x2, y2 = box
+            area = (x2 - x1) * (y2 - y1)
+            pass_object = (
+                object_score > self.args.object_threshold and query_id >= 0
+            )
+            pass_area = area > self.args.area_threshold
+            pass_refer = refer_score > self.args.referring_threshold
+            rows.append({
+                'run_id': run_id,
+                'sample_id': self.sample_id,
+                'variant': self.variant,
+                'video_id': self.seq_num[0],
+                'expression_id': self.expression_id,
+                'frame_id': frame_id,
+                'query_id': query_id,
+                'x1': x1,
+                'y1': y1,
+                'x2': x2,
+                'y2': y2,
+                'object_score': object_score,
+                'refer_score': refer_score,
+                'predicted_state': predicted_state,
+                'area': area,
+                'pass_object': int(pass_object),
+                'pass_area': int(pass_area),
+                'pass_refer': int(pass_refer),
+                'pass_all': int(pass_object and pass_area and pass_refer),
+            })
+
+        with open(self.audit_path, 'a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=self.AUDIT_FIELDNAMES)
+            writer.writerows(rows)
 
     @staticmethod
     def write_results(txt_path, frame_id, bbox_xyxy, identities):
@@ -452,6 +539,8 @@ class Detector(object):
             all_ref_pts = tensor_to_numpy(res['ref_pts'][0, :, :2])
             dt_instances = track_instances.to(torch.device('cpu'))
 
+            self.write_candidate_audit(frame_id=(i + 1), dt_instances=dt_instances)
+
             # filter det instances by score.
             dt_instances = self.filter_dt_by_score(
                 dt_instances, self.args.object_threshold
@@ -518,6 +607,8 @@ if __name__ == '__main__':
         parser.error('--max_expressions must be at least 1')
     if args0.max_frames is not None and args0.max_frames < 1:
         parser.error('--max_frames must be at least 1')
+    if args0.audit_candidates and not args0.audit_dir:
+        parser.error('--audit_dir is required when --audit_candidates is enabled')
     available_gpus = torch.cuda.device_count()
     if args0.gpu_id + args0.num_inference_workers > available_gpus:
         parser.error(

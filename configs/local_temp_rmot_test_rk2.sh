@@ -18,16 +18,15 @@ python inference.py \
   --batch_size 1 \
   --sample_mode random_interval \
   --sample_interval 1 \
-  --sampler_steps 50 90 150 \
-  --sampler_lengths 2 3 4 5 \
+  --sampler_steps 60 80 90 \
+  --sampler_lengths 5 5 5 5 \
   --update_query_pos \
   --merger_dropout 0 \
   --dropout 0 \
   --random_drop 0.1 \
   --fp_ratio 0.3 \
   --query_interaction_layer QIM \
-  --extra_track_attn \
-  --hist_len 8 \
+  --hist_len 4 \
   --rmot_path /home/curtis/datasets/refer-kitti-v2 \
   --text_encoder_path /home/curtis/checkpoints/roberta-base \
   --resume /home/curtis/checkpoints/TempRMOT/checkpoint_rk2.pth \
