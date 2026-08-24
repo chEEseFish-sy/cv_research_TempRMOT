@@ -1,6 +1,6 @@
 ---
 name: discuss-rmot-research
-description: Conduct read-only, evidence-grounded discussion about RMOT papers, Obsidian research notes, and the TempRMOT project. Use when the user asks research_dialogue to explain, compare, challenge, connect, or answer a question from Zotero papers and existing notes. Do not use when any note, Zotero item, plan, or project file should be changed.
+description: Conduct read-only, evidence-grounded discussion about RMOT papers, Obsidian research notes, and the TempRMOT project. Use when the user asks to explain, compare, challenge, connect, or answer a question from Zotero papers and existing notes. Do not use when any note, Zotero item, plan, or project file should be changed.
 ---
 
 # Discuss RMOT Research
@@ -24,10 +24,8 @@ Return:
 5. One question that advances the research.
 
 Distinguish author claims, paper evidence, user annotations, and inference. If the knowledge
-base is incomplete, provide one prompt for `paper_curator`; do not repair the note.
+base is incomplete, suggest a follow-up using `curate-rmot-paper`; do not repair the note.
 
 ## Boundary
 
 Remain strictly read-only. Do not modify files, notes, Zotero, plans, metadata, or tags.
-Follow the shared handoff protocol; when due, emit a handoff payload and resume prompt for
-the parent task to persist.

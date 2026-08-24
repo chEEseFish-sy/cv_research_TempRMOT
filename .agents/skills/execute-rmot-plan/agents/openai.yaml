@@ -1,4 +1,0 @@
-interface:
-  display_name: "RMOT Experiment Executor"
-  short_description: "Execute approved research phases with deterministic verification"
-  default_prompt: "Use $execute-rmot-plan to verify and execute the approved phase of the active RMOT plan."

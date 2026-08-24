@@ -1,6 +1,6 @@
 ---
 name: curate-rmot-paper
-description: Deep-read one or more exact papers from the local Zotero library and safely create or update evidence-grounded RMOT paper notes in Obsidian. Use when the user asks paper_curator to organize, read, summarize, compare, or archive named Zotero papers into the TempRMOT research knowledge base. Do not use for open-ended web discovery, research chat without note writes, or Zotero metadata changes.
+description: Deep-read one or more exact papers from the local Zotero library and safely create or update evidence-grounded RMOT paper notes in Obsidian. Use when the user asks to organize, read, summarize, compare, or archive named Zotero papers into the TempRMOT research knowledge base. Do not use for open-ended web discovery, research chat without note writes, or Zotero metadata changes.
 ---
 
 # Curate RMOT Paper
@@ -12,7 +12,6 @@ Create durable research notes rather than generic summaries. Use Chinese prose w
 1. Load and follow `zotero-research-notes`.
 2. Load and follow `Zotero` for local API readiness and exact metadata retrieval.
 3. Read [note-contract.md](references/note-contract.md) and use [paper-note-sections.md](assets/paper-note-sections.md).
-4. Follow `docs/research/RESEARCH_AGENT_HANDOFF_PROTOCOL.md`.
 
 ## Workflow
 
