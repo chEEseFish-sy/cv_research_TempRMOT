@@ -328,7 +328,10 @@ class Detector(object):
         'video_id',
         'expression_id',
         'frame_id',
+        'slot_index',
+        'is_track_query',
         'query_id',
+        'query_id_before',
         'x1',
         'y1',
         'x2',
@@ -337,10 +340,33 @@ class Detector(object):
         'refer_score',
         'predicted_state',
         'area',
+        'lifecycle_state',
+        'emit_mask',
+        'disappear_time',
+        'disappear_time_before',
+        'created_this_frame',
+        'deleted_this_frame',
+        'qim_selected',
+        'qim_state_updated',
+        'dormant_age',
+        'prediction_valid',
+        'presence_probability',
+        'prediction_uncertainty',
+        'feedback_valid',
+        'feedback_state',
+        'box_residual',
+        'identity_similarity',
+        'reference_source',
+        'reference_x',
+        'reference_y',
+        'pass_track_id',
+        'pass_emit',
+        'pass_object_score',
         'pass_object',
         'pass_area',
         'pass_refer',
         'pass_all',
+        'rejection_reason',
     ]
 
     def __init__(self, args, checkpoint_tag=None, model=None, seq_num=2):
@@ -401,6 +427,8 @@ class Detector(object):
     def filter_dt_by_score(dt_instances: Instances, prob_threshold: float) -> Instances:
         keep = dt_instances.scores > prob_threshold
         keep &= dt_instances.obj_idxes >= 0
+        if dt_instances.has('emit_mask'):
+            keep &= dt_instances.emit_mask
         return dt_instances[keep]
 
     @staticmethod
@@ -426,16 +454,90 @@ class Detector(object):
         predicted_states = dt_instances.labels.detach().cpu().tolist()
         run_id = Path(self.args.output_dir).name or self.checkpoint_tag
 
+        def field_values(name, default):
+            if dt_instances.has(name):
+                return getattr(dt_instances, name).detach().cpu().tolist()
+            return [default] * len(dt_instances)
+
+        lifecycle_states = field_values('lifecycle_state', 0)
+        emit_masks = field_values('emit_mask', True)
+        disappear_times = field_values('disappear_time', 0)
+        query_ids_before = field_values('audit_obj_idx_before', -1)
+        disappear_times_before = field_values(
+            'audit_disappear_time_before', 0
+        )
+        is_track_queries = field_values('audit_is_track_query', False)
+        created_this_frame = field_values(
+            'audit_created_this_frame', False
+        )
+        deleted_this_frame = field_values(
+            'audit_deleted_this_frame', False
+        )
+        qim_selected = field_values('audit_qim_selected', False)
+        qim_state_updated = field_values(
+            'audit_qim_state_updated', False
+        )
+        dormant_ages = field_values('dormant_age', 0)
+        prediction_valids = field_values('prediction_valid', False)
+        presence_probabilities = field_values('next_visibility_logit', 0.0)
+        presence_probabilities = torch.tensor(
+            presence_probabilities, dtype=torch.float32
+        ).sigmoid().tolist()
+        prediction_uncertainties = field_values(
+            'prediction_uncertainty', 0.0
+        )
+        feedback_valids = field_values('feedback_valid', False)
+        feedback_states = field_values('feedback_state', 0)
+        box_residuals = field_values('box_residual', 0.0)
+        identity_similarities = field_values('identity_similarity', 0.0)
+        reference_sources = field_values('ref_source', 0)
+        reference_points = field_values('ref_pts', [0.0, 0.0])
+        reference_points = torch.tensor(
+            reference_points, dtype=torch.float32
+        )[..., :2].sigmoid().tolist()
+
         rows = []
-        for box, object_score, refer_score, query_id, predicted_state in zip(
-                boxes, object_scores, refer_scores, query_ids, predicted_states):
+        values = zip(
+            boxes, object_scores, refer_scores, query_ids, query_ids_before,
+            predicted_states, lifecycle_states, emit_masks, disappear_times,
+            disappear_times_before, is_track_queries, created_this_frame,
+            deleted_this_frame, qim_selected, qim_state_updated, dormant_ages,
+            prediction_valids, presence_probabilities,
+            prediction_uncertainties, feedback_valids, feedback_states,
+            box_residuals, identity_similarities, reference_sources,
+            reference_points,
+        )
+        for slot_index, value in enumerate(values):
+            (box, object_score, refer_score, query_id, query_id_before,
+             predicted_state, lifecycle_state, emit_mask, disappear_time,
+             disappear_time_before, is_track_query, was_created, was_deleted,
+             selected_by_qim, state_updated_by_qim, dormant_age,
+             prediction_valid, presence_probability,
+             prediction_uncertainty, feedback_valid, feedback_state,
+             box_residual, identity_similarity, reference_source,
+             reference_point) = value
             x1, y1, x2, y2 = box
             area = (x2 - x1) * (y2 - y1)
-            pass_object = (
-                object_score > self.args.object_threshold and query_id >= 0
-            )
+            pass_track_id = query_id >= 0
+            pass_emit = bool(emit_mask)
+            pass_object_score = object_score > self.args.object_threshold
+            pass_object = pass_track_id and pass_emit and pass_object_score
             pass_area = area > self.args.area_threshold
             pass_refer = refer_score > self.args.referring_threshold
+            if lifecycle_state == 2:
+                rejection_reason = 'deleted'
+            elif not pass_track_id:
+                rejection_reason = 'invalid_track_id'
+            elif not pass_emit:
+                rejection_reason = 'emit_mask'
+            elif not pass_object_score:
+                rejection_reason = 'object_score'
+            elif not pass_area:
+                rejection_reason = 'area'
+            elif not pass_refer:
+                rejection_reason = 'refer_score'
+            else:
+                rejection_reason = 'pass'
             rows.append({
                 'run_id': run_id,
                 'sample_id': self.sample_id,
@@ -443,7 +545,10 @@ class Detector(object):
                 'video_id': self.seq_num[0],
                 'expression_id': self.expression_id,
                 'frame_id': frame_id,
+                'slot_index': slot_index,
+                'is_track_query': int(is_track_query),
                 'query_id': query_id,
+                'query_id_before': query_id_before,
                 'x1': x1,
                 'y1': y1,
                 'x2': x2,
@@ -452,10 +557,33 @@ class Detector(object):
                 'refer_score': refer_score,
                 'predicted_state': predicted_state,
                 'area': area,
+                'lifecycle_state': lifecycle_state,
+                'emit_mask': int(pass_emit),
+                'disappear_time': disappear_time,
+                'disappear_time_before': disappear_time_before,
+                'created_this_frame': int(was_created),
+                'deleted_this_frame': int(was_deleted),
+                'qim_selected': int(selected_by_qim),
+                'qim_state_updated': int(state_updated_by_qim),
+                'dormant_age': dormant_age,
+                'prediction_valid': int(prediction_valid),
+                'presence_probability': presence_probability,
+                'prediction_uncertainty': prediction_uncertainty,
+                'feedback_valid': int(feedback_valid),
+                'feedback_state': feedback_state,
+                'box_residual': box_residual,
+                'identity_similarity': identity_similarity,
+                'reference_source': reference_source,
+                'reference_x': reference_point[0],
+                'reference_y': reference_point[1],
+                'pass_track_id': int(pass_track_id),
+                'pass_emit': int(pass_emit),
+                'pass_object_score': int(pass_object_score),
                 'pass_object': int(pass_object),
                 'pass_area': int(pass_area),
                 'pass_refer': int(pass_refer),
                 'pass_all': int(pass_object and pass_area and pass_refer),
+                'rejection_reason': rejection_reason,
             })
 
         with open(self.audit_path, 'a', newline='') as f:
@@ -532,14 +660,24 @@ class Detector(object):
                 track_instances.remove('labels')
             seq_h, seq_w, _ = ori_img.shape
 
-            res = self.detr.inference_single_image(cur_img.cuda().float(), self.sentence, (seq_h, seq_w),
-                                                   track_instances)
+            res = self.detr.inference_single_image(
+                cur_img.cuda().float(),
+                self.sentence,
+                (seq_h, seq_w),
+                track_instances,
+                collect_audit=self.args.audit_candidates,
+            )
             track_instances = res['track_instances']
 
             all_ref_pts = tensor_to_numpy(res['ref_pts'][0, :, :2])
             dt_instances = track_instances.to(torch.device('cpu'))
+            audit_instances = res.get(
+                'audit_track_instances', track_instances
+            ).to(torch.device('cpu'))
 
-            self.write_candidate_audit(frame_id=(i + 1), dt_instances=dt_instances)
+            self.write_candidate_audit(
+                frame_id=(i + 1), dt_instances=audit_instances
+            )
 
             # filter det instances by score.
             dt_instances = self.filter_dt_by_score(
@@ -625,10 +763,23 @@ if __name__ == '__main__':
         video_ids = ['0005', '0011', '0013']
 
     seq_nums = [] 
+    requested_expression_ids = set(args0.expression_ids or [])
+    matched_expression_ids = set()
     for video_id in video_ids:  
         expression_jsons = sorted(os.listdir(os.path.join(expressions_root, video_id)))
         for expression_json in expression_jsons:
+            expression_id = Path(expression_json).stem
+            if (requested_expression_ids
+                    and expression_id not in requested_expression_ids):
+                continue
             seq_nums.append([video_id, expression_json])
+            matched_expression_ids.add(expression_id)
+    missing_expression_ids = requested_expression_ids - matched_expression_ids
+    if missing_expression_ids:
+        parser.error(
+            'requested expression IDs were not found: '
+            + ', '.join(sorted(missing_expression_ids))
+        )
     if args0.max_expressions is not None:
         seq_nums = seq_nums[:args0.max_expressions]
 

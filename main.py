@@ -173,6 +173,8 @@ def get_args_parser():
                         help='optional Refer-KITTI video IDs to process')
     parser.add_argument('--max_expressions', default=None, type=int,
                         help='optional cap on the number of expressions')
+    parser.add_argument('--expression_ids', nargs='*', default=None,
+                        help='optional exact expression stems for inference')
     parser.add_argument('--max_frames', default=None, type=int,
                         help='optional cap on frames per expression')
     parser.add_argument('--object_threshold', default=0.6, type=float)
@@ -185,6 +187,12 @@ def get_args_parser():
     parser.add_argument('--data_txt_path_train',
                         default='./datasets/data_path/refer-kitti.train', type=str,
                         help="path to dataset txt split")
+    parser.add_argument(
+        '--max_train_samples',
+        type=int,
+        default=None,
+        help='optionally limit training clips for an MVP smoke run',
+    )
     parser.add_argument('--img_path', default='data/valid/JPEGImages/')
 
     parser.add_argument('--query_interaction_layer', default='QIM', type=str,
@@ -213,6 +221,87 @@ def get_args_parser():
     parser.add_argument('--use_history_inform',action='store_true',default=False)
     parser.add_argument('--tracking',action='store_true',default=False)
     parser.add_argument('--hist_len', type=int, default=4)
+
+
+   # RefLife MVP.
+    parser.add_argument(
+        '--reflife_enabled',
+        action='store_true',
+        default=False,
+    )
+    parser.add_argument(
+        '--long_memory_enabled',
+        action='store_true',
+        default=False,
+    )
+    parser.add_argument(
+        '--reflife_memory_momentum',
+        type=float,
+        default=0.95,
+    )
+    parser.add_argument(
+        '--reflife_object_threshold',
+        type=float,
+        default=0.6,
+    )
+    parser.add_argument(
+        '--reflife_refer_threshold',
+        type=float,
+        default=0.5,
+    )
+    parser.add_argument(
+        '--prediction_feedback_enabled',
+        action='store_true',
+        default=False,
+    )
+    parser.add_argument(
+        '--reflife_box_threshold',
+        type=float,
+        default=0.15,
+    )
+    parser.add_argument(
+        '--reflife_identity_threshold',
+        type=float,
+        default=0.5,
+    )
+    parser.add_argument(
+        '--reliable_geometry_enabled',
+        action='store_true',
+        default=False,
+    )
+    parser.add_argument(
+        '--future_prediction_enabled',
+        action='store_true',
+        default=False,
+    )
+    parser.add_argument('--future_box_loss_coef', type=float, default=2.0)
+    parser.add_argument('--future_giou_loss_coef', type=float, default=2.0)
+    parser.add_argument('--future_presence_loss_coef', type=float, default=1.0)
+    parser.add_argument(
+        '--lifecycle_enabled',
+        action='store_true',
+        default=False,
+    )
+    parser.add_argument('--reflife_presence_threshold', type=float, default=0.6)
+    parser.add_argument('--reflife_max_dormant_age', type=int, default=20)
+    parser.add_argument(
+        '--reference_controller_enabled',
+        action='store_true',
+        default=False,
+    )
+    parser.add_argument(
+        '--reflife_ledger_enabled',
+        action='store_true',
+        default=False,
+    )
+    parser.add_argument(
+        '--reflife_train_only',
+        action='store_true',
+        default=False,
+        help='freeze TempRMOT and train only the RefLife future predictor',
+    )
+
+
     parser.add_argument('--lr_trans', type=float, default=1e-5)
     parser.add_argument('--save_dir', default='')
     # code end
@@ -239,10 +328,36 @@ def main(args):
     model.to(device)
 
     model_without_ddp = model
+    if args.reflife_train_only:
+        if not args.reflife_enabled or not args.future_prediction_enabled:
+            raise ValueError(
+                '--reflife_train_only requires --reflife_enabled and '
+                '--future_prediction_enabled'
+            )
+        for name, parameter in model_without_ddp.named_parameters():
+            parameter.requires_grad = name.startswith('future_predictor.')
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
 
     dataset_train = build_dataset(image_set='train', args=args)
+    if args.max_train_samples is not None:
+        if args.max_train_samples < 1:
+            raise ValueError('--max_train_samples must be at least 1')
+        sample_count = min(len(dataset_train), args.max_train_samples)
+        sample_indices = torch.linspace(
+            0,
+            len(dataset_train) - 1,
+            steps=sample_count,
+        ).round().long().unique().tolist()
+        dataset_train = torch.utils.data.Subset(
+            dataset_train,
+            sample_indices,
+        )
+    epoch_dataset = (
+        dataset_train.dataset
+        if isinstance(dataset_train, torch.utils.data.Subset)
+        else dataset_train
+    )
 
 
     if args.distributed:
@@ -351,7 +466,7 @@ def main(args):
     train_func = train_one_epoch
     if args.dataset_file in ['e2e_rmot','e2e_dance']:
         train_func = train_one_epoch_rmot
-        dataset_train.set_epoch(args.start_epoch)
+        epoch_dataset.set_epoch(args.start_epoch)
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             sampler_train.set_epoch(epoch)
@@ -373,7 +488,7 @@ def main(args):
                 }, checkpoint_path)
 
         if args.dataset_file in ['e2e_rmot','e2e_dance']:
-            dataset_train.step_epoch()
+            epoch_dataset.step_epoch()
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))

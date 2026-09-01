@@ -43,6 +43,19 @@ from .segmentation import sigmoid_focal_loss
 from .position_encoding import PositionEmbeddingSine1D
 from torch.cuda.amp import autocast as autocast
 from .spatial_temporal_reason import SpatialTemporalReasoner
+from .reflife_mvp import (
+    CPULedger,
+    FEEDBACK_CONTRADICTORY,
+    FuturePredictor,
+    LIFECYCLE_ACTIVE,
+    LIFECYCLE_DELETED,
+    LIFECYCLE_DORMANT,
+    LongIdentityMemory,
+    PredictionFeedback,
+    ReferenceController,
+    ReliableGeometry,
+    ReliableObservationGate,
+)
 os.environ["TOKENIZERS_PARALLELISM"] = "false"  # this disables a huggingface tokenizer warning (printed every epoch)
 
 class ClipMatcher(SetCriterion):
@@ -380,6 +393,97 @@ class ClipMatcher(SetCriterion):
             track_instances.iou[active_idxes] = matched_boxlist_iou(Boxes(active_track_boxes), Boxes(gt_boxes))
         return track_instances
 
+    def loss_future_prediction(self, track_instances: Instances):
+        """Supervise frame t predictions with frame t+1 annotations."""
+        frame_id = self._current_frame_idx - 1
+        if frame_id < 0 or frame_id + 1 >= len(self.gt_instances):
+            return
+
+        zero_presence = track_instances.next_visibility_logit.sum() * 0.0
+        zero_box = track_instances.next_box_prediction.sum() * 0.0
+        self.losses_dict[
+            'frame_{}_loss_future_presence'.format(frame_id)
+        ] = zero_presence
+        self.losses_dict[
+            'frame_{}_loss_future_box'.format(frame_id)
+        ] = zero_box
+        self.losses_dict[
+            'frame_{}_loss_future_giou'.format(frame_id)
+        ] = zero_box
+
+        valid_mask = (
+            track_instances.prediction_valid
+            & (track_instances.obj_idxes >= 0)
+        )
+        if not valid_mask.any():
+            return
+
+        query_indices = valid_mask.nonzero(as_tuple=False).flatten()
+        query_obj_ids = track_instances.obj_idxes[query_indices]
+        next_gt = self.gt_instances[frame_id + 1]
+        next_id_to_index = {
+            int(obj_id): index
+            for index, obj_id in enumerate(next_gt.obj_ids.tolist())
+            if obj_id >= 0
+        }
+        present_query_indices = []
+        present_gt_indices = []
+        for query_index, obj_id in zip(query_indices.tolist(), query_obj_ids.tolist()):
+            if obj_id in next_id_to_index:
+                present_query_indices.append(query_index)
+                present_gt_indices.append(next_id_to_index[obj_id])
+
+        presence_target = torch.tensor(
+            [1.0 if int(obj_id) in next_id_to_index else 0.0 for obj_id in query_obj_ids],
+            dtype=track_instances.next_visibility_logit.dtype,
+            device=track_instances.next_visibility_logit.device,
+        )
+        loss_presence = F.binary_cross_entropy_with_logits(
+            track_instances.next_visibility_logit[query_indices],
+            presence_target,
+            reduction='sum',
+        )
+        self.losses_dict[
+            'frame_{}_loss_future_presence'.format(frame_id)
+        ] = loss_presence
+
+        if not present_query_indices:
+            return
+
+        present_query_indices = torch.tensor(
+            present_query_indices,
+            dtype=torch.long,
+            device=query_indices.device,
+        )
+        present_gt_indices = torch.tensor(
+            present_gt_indices,
+            dtype=torch.long,
+            device=query_indices.device,
+        )
+        predicted_box = track_instances.next_box_prediction[present_query_indices]
+        target_box = next_gt.boxes[present_gt_indices]
+        scale = track_instances.prediction_uncertainty[
+            present_query_indices
+        ].clamp(min=1e-2, max=10.0)
+        box_error = F.smooth_l1_loss(
+            predicted_box,
+            target_box,
+            reduction='none',
+        ).mean(dim=-1)
+        loss_box = (box_error / scale + scale.log1p()).sum()
+        loss_giou = (
+            1 - torch.diag(box_ops.generalized_box_iou(
+                box_ops.box_cxcywh_to_xyxy(predicted_box),
+                box_ops.box_cxcywh_to_xyxy(target_box),
+            ))
+        ).sum()
+        self.losses_dict[
+            'frame_{}_loss_future_box'.format(frame_id)
+        ] = loss_box
+        self.losses_dict[
+            'frame_{}_loss_future_giou'.format(frame_id)
+        ] = loss_giou
+
     def forward(self, outputs, input_data: dict):
         # losses of each frame are calculated during the model's forwarding and are outputted by the model as outputs['losses_dict].
         losses = outputs.pop("losses_dict")
@@ -399,7 +503,13 @@ class RuntimeTrackerBase(object):
     def clear(self):
         self.max_obj_id = 0
 
-    def update(self, track_instances: Instances):
+    def update(
+        self,
+        track_instances: Instances,
+        reflife_enabled=False,
+        presence_threshold=0.6,
+        max_dormant_age=20,
+    ):
         device = track_instances.obj_idxes.device
 
         track_instances.disappear_time[track_instances.scores >= self.score_thresh] = 0
@@ -411,8 +521,55 @@ class RuntimeTrackerBase(object):
         self.max_obj_id += num_new_objs
 
         track_instances.disappear_time[disappeared_obj] += 1
+        if reflife_enabled:
+            active_obj = (
+                (track_instances.obj_idxes >= 0)
+                & (track_instances.scores >= self.filter_score_thresh)
+            )
+            track_instances.lifecycle_state[active_obj] = LIFECYCLE_ACTIVE
+            track_instances.dormant_age[active_obj] = 0
+
+            predicted_present = (
+                track_instances.prediction_valid
+                & (
+                    track_instances.next_visibility_logit.sigmoid()
+                    >= presence_threshold
+                )
+                & (
+                    track_instances.feedback_state
+                    != FEEDBACK_CONTRADICTORY
+                )
+            )
+            track_instances.lifecycle_state[disappeared_obj] = LIFECYCLE_DORMANT
+            track_instances.dormant_age[disappeared_obj] += 1
+            can_hold = (
+                disappeared_obj
+                & predicted_present
+                & (track_instances.dormant_age < max_dormant_age)
+            )
+            to_del = (
+                disappeared_obj
+                & (track_instances.disappear_time >= self.miss_tolerance)
+                & ~can_hold
+            ) | (
+                disappeared_obj
+                & (track_instances.dormant_age >= max_dormant_age)
+            )
+            track_instances.lifecycle_state[to_del] = LIFECYCLE_DELETED
+            track_instances.obj_idxes[to_del] = -1
+            track_instances.emit_mask[:] = (
+                (track_instances.obj_idxes >= 0)
+                & (track_instances.lifecycle_state == LIFECYCLE_ACTIVE)
+                & (track_instances.scores >= self.filter_score_thresh)
+            )
+            return
+
         to_del = disappeared_obj & (track_instances.disappear_time >= self.miss_tolerance)
         track_instances.obj_idxes[to_del] = -1
+        track_instances.emit_mask[:] = (
+            (track_instances.obj_idxes >= 0)
+            & (track_instances.scores >= self.filter_score_thresh)
+        )
 
 
 class TrackerPostProcess(nn.Module):
@@ -463,7 +620,14 @@ def _get_clones(module, N):
 class TransRMOT(nn.Module):
     def __init__(self, backbone, transformer, num_classes, num_queries, num_feature_levels, criterion, track_embed,
                  aux_loss=True, with_box_refine=False, two_stage=False, memory_bank=None, use_checkpoint=False,
-                 tracking=False, hist_len=4, text_encoder_path='roberta-base'):
+                 tracking=False, hist_len=4, text_encoder_path='roberta-base', reflife_enabled=False,
+                 long_memory_enabled=False, reflife_memory_momentum=0.95, reflife_object_threshold=0.6,
+                 reflife_refer_threshold=0.5, prediction_feedback_enabled=False,
+                 reflife_box_threshold=0.15, reflife_identity_threshold=0.5,
+                 reliable_geometry_enabled=False, future_prediction_enabled=False,
+                 lifecycle_enabled=False, reflife_presence_threshold=0.6,
+                 reflife_max_dormant_age=20, reference_controller_enabled=False,
+                 reflife_ledger_enabled=False):
         """ Initializes the model.
         Parameters:
             backbone: torch module of the backbone to be used. See backbone.py
@@ -492,6 +656,51 @@ class TransRMOT(nn.Module):
         self.STReasoner = SpatialTemporalReasoner(hist_len=hist_len)
         self.hist_len = hist_len
 
+        # RefLife MVP switches.
+        self.reflife_enabled = bool(
+            reflife_enabled
+        )
+        self.long_memory_enabled = bool(
+            long_memory_enabled
+        )
+        self.prediction_feedback_enabled = bool(
+            prediction_feedback_enabled
+        )
+        self.reliable_geometry_enabled = bool(
+            reliable_geometry_enabled
+        )
+        self.future_prediction_enabled = bool(
+            future_prediction_enabled
+        )
+        self.lifecycle_enabled = bool(lifecycle_enabled)
+        self.reference_controller_enabled = bool(reference_controller_enabled)
+        self.reflife_ledger_enabled = bool(reflife_ledger_enabled)
+        self.reflife_presence_threshold = reflife_presence_threshold
+        self.reflife_max_dormant_age = reflife_max_dormant_age
+
+        # These modules have no learnable parameters in the MVP.
+        self.reliable_observation_gate = (
+            ReliableObservationGate(
+                object_threshold=(
+                    reflife_object_threshold
+                ),
+                refer_threshold=(
+                    reflife_refer_threshold
+                ),
+            )
+        )
+
+        self.long_identity_memory = LongIdentityMemory(
+            momentum=reflife_memory_momentum
+        )
+        self.prediction_feedback = PredictionFeedback(
+            box_threshold=reflife_box_threshold,
+            identity_threshold=reflife_identity_threshold,
+        )
+        self.reliable_geometry = ReliableGeometry()
+        self.future_predictor = FuturePredictor(feature_dim=hidden_dim)
+        self.reference_controller = ReferenceController()
+        self.reflife_ledger = CPULedger()
         if not two_stage:
             self.query_embed = nn.Embedding(num_queries, hidden_dim*2) #(300,256)
 
@@ -624,6 +833,99 @@ class TransRMOT(nn.Module):
             (len(track_instances), self.hist_len), dtype=torch.bool, device=device)
        
         track_instances.output_embedding = torch.zeros((num_queries, dim //2 ), device=device)
+
+        # RefLife persistent state.
+        # These fields travel with each query across frames.
+        feature_dim = dim // 2
+
+        # Stable identity memory.
+        track_instances.long_memory = torch.zeros(
+            (num_queries, feature_dim),
+            dtype=torch.float32,
+            device=device,
+        )
+        track_instances.long_memory_valid = torch.zeros(
+            (num_queries,),
+            dtype=torch.bool,
+            device=device,
+        )
+        track_instances.long_memory_age = torch.zeros(
+            (num_queries,),
+            dtype=torch.long,
+            device=device,
+        )
+
+        # Last reliable geometric state.
+        track_instances.last_reliable_box = torch.zeros(
+            (num_queries, 4),
+            dtype=torch.float32,
+            device=device,
+        )
+        track_instances.velocity = torch.zeros(
+            (num_queries, 4),
+            dtype=torch.float32,
+            device=device,
+        )
+        track_instances.reliable_state_valid = torch.zeros(
+            (num_queries,),
+            dtype=torch.bool,
+            device=device,
+        )
+
+        # Prediction made for the next frame.
+        track_instances.next_box_prediction = torch.zeros(
+            (num_queries, 4),
+            dtype=torch.float32,
+            device=device,
+        )
+        track_instances.next_visibility_logit = torch.zeros(
+            (num_queries,),
+            dtype=torch.float32,
+            device=device,
+        )
+        track_instances.prediction_uncertainty = torch.zeros(
+            (num_queries,),
+            dtype=torch.float32,
+            device=device,
+        )
+        track_instances.prediction_valid = torch.zeros(
+            (num_queries,),
+            dtype=torch.bool,
+            device=device,
+        )
+
+        # Lifecycle and output state.
+        track_instances.lifecycle_state = torch.zeros(
+            (num_queries,),
+            dtype=torch.uint8,
+            device=device,
+        )
+        track_instances.emit_mask = torch.zeros(
+            (num_queries,),
+            dtype=torch.bool,
+            device=device,
+        )
+        track_instances.dormant_age = torch.zeros(
+            (num_queries,),
+            dtype=torch.long,
+            device=device,
+        )
+        track_instances.ref_source = torch.zeros(
+            (num_queries,),
+            dtype=torch.uint8,
+            device=device,
+        )
+
+        # Current-frame prediction feedback.
+        track_instances.box_residual = torch.zeros(
+            (num_queries,), dtype=torch.float32, device=device)
+        track_instances.identity_similarity = torch.zeros(
+            (num_queries,), dtype=torch.float32, device=device)
+        track_instances.feedback_valid = torch.zeros(
+            (num_queries,), dtype=torch.bool, device=device)
+        track_instances.feedback_state = torch.zeros(
+            (num_queries,), dtype=torch.uint8, device=device)
+
         mem_bank_len = self.mem_bank_len
         track_instances.mem_bank = torch.zeros((len(track_instances), mem_bank_len, dim), dtype=torch.float32, device=device)
         track_instances.mem_padding_mask = torch.ones((len(track_instances), mem_bank_len), dtype=torch.bool, device=device)
@@ -633,6 +935,90 @@ class TransRMOT(nn.Module):
 
     def clear(self):
         self.track_base.clear()
+        self.reflife_ledger.clear()
+
+    @torch.no_grad()
+    def _update_reflife_long_memory(
+        self,
+        track_instances,
+    ):
+        """Update RefLife long memory when its switches are enabled."""
+        if not self.reflife_enabled:
+            return track_instances
+
+        if not self.long_memory_enabled:
+            return track_instances
+
+        write_mask = self.reliable_observation_gate(
+            track_instances
+        )
+        if self.prediction_feedback_enabled:
+            write_mask &= (
+                track_instances.feedback_state
+                != FEEDBACK_CONTRADICTORY
+            )
+
+        track_instances = self.long_identity_memory(
+            track_instances,
+            write_mask,
+        )
+
+        return track_instances
+
+    @torch.no_grad()
+    def _compare_reflife_prediction(self, track_instances):
+        """Validate the prediction carried from the previous frame."""
+        if not self.reflife_enabled or not self.prediction_feedback_enabled:
+            track_instances.box_residual.zero_()
+            track_instances.identity_similarity.zero_()
+            track_instances.feedback_valid.zero_()
+            track_instances.feedback_state.zero_()
+            return track_instances
+
+        observation_mask = self.reliable_observation_gate(track_instances)
+        return self.prediction_feedback(track_instances, observation_mask)
+
+    @torch.no_grad()
+    def _update_reflife_geometry(self, track_instances):
+        if not self.reflife_enabled or not self.reliable_geometry_enabled:
+            return track_instances
+        update_mask = self.reliable_observation_gate(track_instances)
+        if self.prediction_feedback_enabled:
+            update_mask &= (
+                track_instances.feedback_state
+                != FEEDBACK_CONTRADICTORY
+            )
+        return self.reliable_geometry(track_instances, update_mask)
+
+    def _predict_reflife_next_frame(self, track_instances):
+        """Store a one-step prediction after current evidence is processed."""
+        if not self.reflife_enabled or not self.future_prediction_enabled:
+            track_instances.prediction_valid.zero_()
+            return track_instances
+        if self.training:
+            # Matching is training-only supervision. It never enters the
+            # recurrent track state used during inference.
+            observation_mask = (
+                (track_instances.obj_idxes >= 0)
+                & torch.isfinite(track_instances.pred_boxes).all(dim=-1)
+                & torch.isfinite(
+                    track_instances.output_embedding
+                ).all(dim=-1)
+            )
+        else:
+            observation_mask = self.reliable_observation_gate(track_instances)
+        return self.future_predictor(track_instances, observation_mask)
+
+    @torch.no_grad()
+    def _update_reflife_reference(self, track_instances):
+        if not self.reflife_enabled or not self.reference_controller_enabled:
+            return track_instances
+        return self.reference_controller(track_instances)
+
+    @torch.no_grad()
+    def _record_reflife_ledger(self, track_instances):
+        if self.reflife_enabled and self.reflife_ledger_enabled:
+            self.reflife_ledger.record(track_instances)
 
     @torch.jit.unused
     def _set_aux_loss(self, outputs_class, outputs_coord, outputs_refer):
@@ -768,7 +1154,9 @@ class TransRMOT(nn.Module):
         return out
 
 
-    def _post_process_single_image(self, frame_res, track_instances, is_last):
+    def _post_process_single_image(
+        self, frame_res, track_instances, is_last, collect_audit=False
+    ):
         frame_res['track_instances'] = track_instances
         text_result = {
             'text_word_mask':frame_res.pop('text_word_mask'),
@@ -791,17 +1179,75 @@ class TransRMOT(nn.Module):
             track_instances = self.criterion.calc_iou(track_instances)
             self.criterion.loss_hist_reasoning(track_instances)
             track_instances = self.frame_summarization(track_instances, tracking=False)
+            track_instances = self._compare_reflife_prediction(track_instances)
+            track_instances = (
+                self._update_reflife_long_memory(
+                    track_instances
+                )
+            )
+            track_instances = self._update_reflife_geometry(track_instances)
+            track_instances = self._predict_reflife_next_frame(track_instances)
+            self.criterion.loss_future_prediction(track_instances)
             frame_res['pred_logits'] = track_instances.pred_logits
             frame_res['pred_boxes'] = track_instances.pred_boxes
             frame_res['pred_refers'] = track_instances.pred_refers
         else:
             track_instances = self.STReasoner(track_instances,text_result,training=False)
             track_instances = self.frame_summarization(track_instances,tracking=True)
-            self.track_base.update(track_instances)
+            track_instances = self._compare_reflife_prediction(track_instances)
+            track_instances = (
+                self._update_reflife_long_memory(
+                    track_instances
+                )
+            )
+            track_instances = self._update_reflife_geometry(track_instances)
+            track_instances = self._predict_reflife_next_frame(track_instances)
+            if collect_audit:
+                audit_obj_idx_before = track_instances.obj_idxes.clone()
+                audit_disappear_time_before = track_instances.disappear_time.clone()
+            self.track_base.update(
+                track_instances,
+                reflife_enabled=(
+                    self.reflife_enabled
+                    and self.lifecycle_enabled
+                ),
+                presence_threshold=self.reflife_presence_threshold,
+                max_dormant_age=self.reflife_max_dormant_age,
+            )
+            track_instances = self._update_reflife_reference(track_instances)
+            self._record_reflife_ledger(track_instances)
         
         tmp = {}
         tmp['init_track_instances'] = self._generate_empty_tracks()
         tmp['track_instances'] = track_instances
+        if collect_audit:
+            audit_track_instances = track_instances[:]
+            audit_track_instances.audit_obj_idx_before = audit_obj_idx_before
+            audit_track_instances.audit_disappear_time_before = (
+                audit_disappear_time_before
+            )
+            audit_track_instances.audit_is_track_query = (
+                torch.arange(
+                    len(track_instances),
+                    device=track_instances.obj_idxes.device,
+                ) >= self.num_queries
+            )
+            audit_track_instances.audit_created_this_frame = (
+                (audit_obj_idx_before < 0)
+                & (track_instances.obj_idxes >= 0)
+            )
+            audit_track_instances.audit_deleted_this_frame = (
+                (audit_obj_idx_before >= 0)
+                & (track_instances.obj_idxes < 0)
+            )
+            audit_track_instances.audit_qim_selected = (
+                track_instances.obj_idxes >= 0
+            )
+            audit_track_instances.audit_qim_state_updated = (
+                (track_instances.obj_idxes >= 0)
+                & (track_instances.scores > 0.5)
+            )
+            frame_res['audit_track_instances'] = audit_track_instances
         if not is_last:
             out_track_instances = self.track_embed(tmp)
             frame_res['track_instances'] = out_track_instances
@@ -811,18 +1257,35 @@ class TransRMOT(nn.Module):
 
 
     @torch.no_grad()
-    def inference_single_image(self, img, sentence, ori_img_size, track_instances=None):
+    def inference_single_image(
+        self,
+        img,
+        sentence,
+        ori_img_size,
+        track_instances=None,
+        collect_audit=False,
+    ):
         if not isinstance(img, NestedTensor):
             img = nested_tensor_from_tensor_list(img)
         if track_instances is None:
             track_instances = self._generate_empty_tracks()
         res = self._forward_single_image(img, track_instances=track_instances, sentences=sentence)
         track_instances = self.load_detection_output_into_cache(track_instances,res)
-        res = self._post_process_single_image(res, track_instances, False)
+        res = self._post_process_single_image(
+            res,
+            track_instances,
+            False,
+            collect_audit=collect_audit,
+        )
 
         track_instances = res['track_instances']
+        audit_track_instances = res.pop('audit_track_instances', None)
         track_instances = self.post_process(track_instances, ori_img_size)
         ret = {'track_instances': track_instances}
+        if audit_track_instances is not None:
+            ret['audit_track_instances'] = self.post_process(
+                audit_track_instances, ori_img_size
+            )
         if 'ref_pts' in res:
             ref_pts = res['ref_pts']
             img_h, img_w = ori_img_size
@@ -977,6 +1440,12 @@ def build(args):
                             'frame_{}_temporal_loss_giou'.format(i): args.giou_loss_coef,
                             'frame_{}_temporal_loss_refer'.format(i): args.refer_loss_coef,
                             })
+        if getattr(args, 'future_prediction_enabled', False):
+            weight_dict.update({
+                'frame_{}_loss_future_box'.format(i): args.future_box_loss_coef,
+                'frame_{}_loss_future_giou'.format(i): args.future_giou_loss_coef,
+                'frame_{}_loss_future_presence'.format(i): args.future_presence_loss_coef,
+            })
 
     # TODO this is a hack
     if args.aux_loss:
@@ -1013,5 +1482,80 @@ def build(args):
         tracking = args.tracking,
         hist_len = args.hist_len,
         text_encoder_path=args.text_encoder_path,
+        reflife_enabled=getattr(
+            args,
+            'reflife_enabled',
+            False,
+        ),
+        long_memory_enabled=getattr(
+            args,
+            'long_memory_enabled',
+            False,
+        ),
+        reflife_memory_momentum=getattr(
+            args,
+            'reflife_memory_momentum',
+            0.95,
+        ),
+        reflife_object_threshold=getattr(
+            args,
+            'reflife_object_threshold',
+            0.6,
+        ),
+        reflife_refer_threshold=getattr(
+            args,
+            'reflife_refer_threshold',
+            0.5,
+        ),
+        prediction_feedback_enabled=getattr(
+            args,
+            'prediction_feedback_enabled',
+            False,
+        ),
+        reflife_box_threshold=getattr(
+            args,
+            'reflife_box_threshold',
+            0.15,
+        ),
+        reflife_identity_threshold=getattr(
+            args,
+            'reflife_identity_threshold',
+            0.5,
+        ),
+        reliable_geometry_enabled=getattr(
+            args,
+            'reliable_geometry_enabled',
+            False,
+        ),
+        future_prediction_enabled=getattr(
+            args,
+            'future_prediction_enabled',
+            False,
+        ),
+        lifecycle_enabled=getattr(
+            args,
+            'lifecycle_enabled',
+            False,
+        ),
+        reflife_presence_threshold=getattr(
+            args,
+            'reflife_presence_threshold',
+            0.6,
+        ),
+        reflife_max_dormant_age=getattr(
+            args,
+            'reflife_max_dormant_age',
+            20,
+        ),
+        reference_controller_enabled=getattr(
+            args,
+            'reference_controller_enabled',
+            False,
+        ),
+        reflife_ledger_enabled=getattr(
+            args,
+            'reflife_ledger_enabled',
+            False,
+        ),
     )
     return model, criterion, postprocessors

@@ -315,6 +315,8 @@ class Detector(object):
     @staticmethod
     def filter_dt_by_score(dt_instances: Instances, prob_threshold: float) -> Instances:
         keep = dt_instances.scores > prob_threshold
+        if dt_instances.has('emit_mask'):
+            keep &= dt_instances.emit_mask
         return dt_instances[keep]
 
     @staticmethod
