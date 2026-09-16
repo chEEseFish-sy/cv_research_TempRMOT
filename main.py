@@ -36,6 +36,18 @@ from tensorboardX import SummaryWriter
 
 def get_args_parser():
     parser = argparse.ArgumentParser('Deformable DETR Detector', add_help=False)
+    parser.add_argument('--ttt_memory', action='store_true')
+    parser.add_argument('--ttt_mode', default='normal', choices=['normal', 'reset', 'no_update'])
+    parser.add_argument('--ttt_inner_lr', default=0.01, type=float)
+    parser.add_argument('--ttt_residual_limit', default=0.2, type=float)
+    parser.add_argument('--ttt_tbptt', default=8, type=int)
+    parser.add_argument('--ttt_disable_feature', action='store_true')
+    parser.add_argument('--ttt_disable_actions', action='store_true')
+    parser.add_argument('--ttt_action_loss_coef', default=1.0, type=float)
+    parser.add_argument('--ttt_candidate_loss_coef', default=1.0, type=float)
+    parser.add_argument('--ttt_identity_loss_coef', default=0.2, type=float)
+    parser.add_argument('--ttt_feedback_loss_coef', default=0.2, type=float)
+    parser.add_argument('--ttt_safe_loss_coef', default=0.1, type=float)
     parser.add_argument('--lr', default=2e-4, type=float)
     parser.add_argument('--lr_backbone_names', default=["backbone.0"], type=str, nargs='+')
     parser.add_argument('--lr_temporal_names', default=["STReasoner","fusion_module","refer_embed"], type=str, nargs='+')

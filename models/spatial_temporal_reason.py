@@ -40,7 +40,7 @@ class SpatialTemporalReasoner(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
         return 
-    
+
     def init_params_and_layers(self):
         # Modules for history reasoning
         if self.history_reasoning:
@@ -74,7 +74,7 @@ class SpatialTemporalReasoner(nn.Module):
             
         return
 
-    def forward(self, track_instances,text_info,training=False):
+    def forward(self, track_instances, text_info, training=False, feature_adapter=None):
         # 1. Prepare the spatial-temporal features
         track_instances = self.frame_shift(track_instances)
 
@@ -83,6 +83,8 @@ class SpatialTemporalReasoner(nn.Module):
         # 2. History reasoning
         if self.history_reasoning:
             track_instances = self.forward_history_reasoning(track_instances)
+            if feature_adapter is not None:
+                track_instances = feature_adapter(track_instances)
             track_instances = self.forward_history_refine(track_instances,training)
 
         return track_instances
@@ -245,6 +247,3 @@ class MLP(nn.Module):
         for i, layer in enumerate(self.layers):
             x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
         return x
-
-
-    

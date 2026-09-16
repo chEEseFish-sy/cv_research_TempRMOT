@@ -402,6 +402,13 @@ class RuntimeTrackerBase(object):
     def update(self, track_instances: Instances):
         device = track_instances.obj_idxes.device
 
+        if track_instances.has('ttt_action'):
+            hold = track_instances.ttt_action == 2
+            terminate = track_instances.ttt_action == 3
+        else:
+            hold = torch.zeros_like(track_instances.obj_idxes, dtype=torch.bool)
+            terminate = torch.zeros_like(track_instances.obj_idxes, dtype=torch.bool)
+
         track_instances.disappear_time[track_instances.scores >= self.score_thresh] = 0
         new_obj = (track_instances.obj_idxes == -1) & (track_instances.scores >= self.score_thresh)
         disappeared_obj = (track_instances.obj_idxes >= 0) & (track_instances.scores < self.filter_score_thresh)
@@ -412,6 +419,7 @@ class RuntimeTrackerBase(object):
 
         track_instances.disappear_time[disappeared_obj] += 1
         to_del = disappeared_obj & (track_instances.disappear_time >= self.miss_tolerance)
+        to_del = (to_del & ~hold) | (terminate & (track_instances.obj_idxes >= 0))
         track_instances.obj_idxes[to_del] = -1
 
 
@@ -786,8 +794,19 @@ class TransRMOT(nn.Module):
                 self.criterion.calc_loss_for_track_scores(track_instances)
         
            
+        ttt_memory = getattr(self, 'ttt_memory', None)
         if self.training:
-            track_instances = self.STReasoner(track_instances,text_result,training=True)
+            frame_id = self.criterion._current_frame_idx - 1
+            gt_instances = self.criterion.gt_instances[frame_id]
+            adapter = (lambda instances: ttt_memory(
+                instances, gt_instances=gt_instances)) if ttt_memory is not None else None
+            track_instances = self.STReasoner(
+                track_instances, text_result, training=True,
+                feature_adapter=adapter)
+            if ttt_memory is not None:
+                for name, loss in ttt_memory.pop_frame_losses().items():
+                    self.criterion.losses_dict[
+                        'frame_{}_ttt_{}'.format(frame_id, name)] = loss
             track_instances = self.criterion.calc_iou(track_instances)
             self.criterion.loss_hist_reasoning(track_instances)
             track_instances = self.frame_summarization(track_instances, tracking=False)
@@ -795,7 +814,11 @@ class TransRMOT(nn.Module):
             frame_res['pred_boxes'] = track_instances.pred_boxes
             frame_res['pred_refers'] = track_instances.pred_refers
         else:
-            track_instances = self.STReasoner(track_instances,text_result,training=False)
+            track_instances = self.STReasoner(
+                track_instances, text_result, training=False,
+                feature_adapter=ttt_memory)
+            if ttt_memory is not None:
+                track_instances = ttt_memory.apply_runtime_actions(track_instances)
             track_instances = self.frame_summarization(track_instances,tracking=True)
             self.track_base.update(track_instances)
         
@@ -804,6 +827,8 @@ class TransRMOT(nn.Module):
         tmp['track_instances'] = track_instances
         if not is_last:
             out_track_instances = self.track_embed(tmp)
+            if getattr(self, 'ttt_memory', None) is not None:
+                self.ttt_memory.prune(out_track_instances.obj_idxes)
             frame_res['track_instances'] = out_track_instances
         else:
             frame_res['track_instances'] = None
@@ -815,6 +840,8 @@ class TransRMOT(nn.Module):
         if not isinstance(img, NestedTensor):
             img = nested_tensor_from_tensor_list(img)
         if track_instances is None:
+            if getattr(self, 'ttt_memory', None) is not None:
+                self.ttt_memory.reset()
             track_instances = self._generate_empty_tracks()
         res = self._forward_single_image(img, track_instances=track_instances, sentences=sentence)
         track_instances = self.load_detection_output_into_cache(track_instances,res)
@@ -884,6 +911,8 @@ class TransRMOT(nn.Module):
 
         track_instances = self._generate_empty_tracks()
         keys = list(track_instances._fields.keys())
+        if getattr(self, 'ttt_memory', None) is not None:
+            self.ttt_memory.reset()
         for frame_index, frame in enumerate(frames):
             frame.requires_grad = False
             is_last = frame_index == len(frames) - 1
@@ -938,6 +967,10 @@ class TransRMOT(nn.Module):
             outputs['pred_logits'].append(frame_res['pred_logits'])
             outputs['pred_boxes'].append(frame_res['pred_boxes'])
             outputs['pred_refers'].append(frame_res['pred_refers'])
+            if (self.training and getattr(self, 'ttt_memory', None) is not None
+                    and getattr(self, 'ttt_tbptt', 0) > 0
+                    and (frame_index + 1) % self.ttt_tbptt == 0):
+                self.ttt_memory.detach_states()
 
         if not self.training:
             outputs['track_instances'] = track_instances
@@ -976,7 +1009,15 @@ def build(args):
                             'frame_{}_temporal_loss_bbox'.format(i): args.bbox_loss_coef,
                             'frame_{}_temporal_loss_giou'.format(i): args.giou_loss_coef,
                             'frame_{}_temporal_loss_refer'.format(i): args.refer_loss_coef,
-                            })
+                             })
+        if getattr(args, 'ttt_memory', False):
+            weight_dict.update({
+                'frame_{}_ttt_action'.format(i): args.ttt_action_loss_coef,
+                'frame_{}_ttt_candidate'.format(i): args.ttt_candidate_loss_coef,
+                'frame_{}_ttt_identity'.format(i): args.ttt_identity_loss_coef,
+                'frame_{}_ttt_feedback'.format(i): args.ttt_feedback_loss_coef,
+                'frame_{}_ttt_safe'.format(i): args.ttt_safe_loss_coef,
+            })
 
     # TODO this is a hack
     if args.aux_loss:
@@ -1014,4 +1055,13 @@ def build(args):
         hist_len = args.hist_len,
         text_encoder_path=args.text_encoder_path,
     )
+    if getattr(args, 'ttt_memory', False):
+        from .ttt_memory import TrackTTTMemory
+        model.requires_grad_(False)
+        model.ttt_memory = TrackTTTMemory(
+            inner_lr=args.ttt_inner_lr, mode=args.ttt_mode,
+            residual_limit=args.ttt_residual_limit,
+            apply_feature=not args.ttt_disable_feature,
+            apply_actions=not args.ttt_disable_actions)
+        model.ttt_tbptt = args.ttt_tbptt
     return model, criterion, postprocessors

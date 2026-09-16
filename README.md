@@ -14,6 +14,65 @@ Bootstrapping Referring Multi-Object Tracking</b>
 **Abstract.**
 Referring multi-object tracking (RMOT) aims at detecting and tracking multiple objects following human instruction represented by a natural language expression. Existing RMOT benchmarks are usually formulated through manual annotations, integrated with static regulations. This approach results in a dearth of notable diversity and a constrained scope of implementation. In this work, our key idea is to bootstrap the task of referring multi-object tracking by introducing discriminative language words as much as possible. In specific, we first develop Refer-KITTI into a large-scale dataset, named Refer-KITTI-V2. It starts with 2,719 manual annotations, addressing the issue of class imbalance and introducing more keywords to make it closer to real-world scenarios compared to Refer-KITTI. They are further expanded to a total of 9,758 annotations by prompting large language models, which create 617 different words, surpassing previous RMOT benchmarks. In addition, the end-to-end framework in RMOT is also bootstrapped by a simple yet elegant temporal advancement strategy, which achieves better performance than previous approaches. 
 
+## Structured TTT research extension
+
+The `ttt-memory` branch adds a track-private fast-weight memory after STReasoner
+history reasoning and before its refined prediction heads. The original TempRMOT
+weights remain frozen. Each live track writes Identity, Evidence, and delayed
+Feedback tokens, retrieves Detect Query candidates, and predicts one of four
+actions: `TRUST`, `REASSOCIATE`, `HOLD`, or `TERMINATE`.
+
+Main files:
+
+- `models/ttt_memory.py`: online fast-weight memory and training losses;
+- `models/track_ttt_action.py`: structured tokens, candidate retrieval, and actions;
+- `tools/run_ttt_pilot.py`: bounded TTT-only training and resumable evaluation;
+- `tools/evaluate_ttt_pilot.py`: HOTA, CLEAR, and Identity evaluation;
+- `docs/research/STRUCTURED_TTT_ACTION_FEEDBACK_RESULTS_20260910.md`: experiment record.
+
+Quick verification:
+
+```bash
+conda activate temprmot
+PYTHONPATH=. python -m unittest discover -s tests -p 'test_ttt_*.py' -v
+PYTHONPATH=. python tools/check_ttt_integration.py --output /tmp/ttt_zero_gate.json
+```
+
+Example TTT-only training:
+
+```bash
+PYTHONPATH=. python tools/run_ttt_pilot.py train \
+  --output /path/to/experiment \
+  --baseline /path/to/checkpoint_rk2.pth \
+  --frames 16 --clips 30 --epochs 2 \
+  --tbptt 8 --outer-lr 1e-3 --objective structured
+```
+
+Example official Refer-KITTI-V2 evaluation:
+
+```bash
+PYTHONPATH=. python tools/run_ttt_pilot.py eval \
+  --output /path/to/output \
+  --baseline /path/to/checkpoint_rk2.pth \
+  --checkpoint /path/to/ttt_checkpoint.pth \
+  --seqmap datasets/data_path/seqmap.txt \
+  --result-tag structured_ttt --resume-eval
+
+PYTHONPATH=. python tools/evaluate_ttt_pilot.py /path/to/output \
+  --results-name results_structured_ttt
+```
+
+Current full-set result on 862 Refer-KITTI-V2 expressions:
+
+| Model | HOTA | DetA | AssA |
+|---|---:|---:|---:|
+| Frozen TempRMOT reproduction | 35.249 | 23.412 | 53.191 |
+| Structured TTT | 34.711 | 22.928 | 52.669 |
+
+This is a research prototype, not an improvement over the baseline. The full-set
+result is retained as a negative result; the next step is event-balanced training
+and ablation, not tuning on the official test set.
+
 ## Updates
 - [2024.06.19] Refer-KITTI-V2 is released. Thanks for your patience :)
 - [2024.06.12] Code is released. Paper is released at [arXiv](http://arxiv.org/abs/2406.05039).
@@ -90,8 +149,6 @@ We thank the authors that open the following projects.
 - [PF-Track](https://github.com/TRI-ML/PF-Track)
 - [MOTR](https://github.com/megvii-research/MOTR)
 - [Deformable DETR](https://github.com/fundamentalvision/Deformable-DETR)
-
-
 
 
 
