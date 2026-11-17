@@ -1,3 +1,7 @@
+<!-- managed:collaboration-brief:start -->
+> **合作说明 / Project progress（2026-11-17）**：新加入的同学请先阅读 [中文项目与进展说明](docs/PROJECT_BRIEF_zh.md)。文中包含当前结果、最新实验与仓库代码的版本边界，以及建议分工。
+<!-- managed:collaboration-brief:end -->
+
 <div align="center">
 <h1>
 <b>
